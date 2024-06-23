@@ -1,34 +1,49 @@
-#This is an attempt at implementing the AlphaZero paper
-#My goal is to reproduce as close as possible the experimental results produced by the paper
-#AlphaZero Implementation
+#Implementation of the AlphaZero Algorithm
+#By Victor Habiyambere
+#Started: June 9th, 2024
+#2024-06-09
+
 #2024-05-15
 
 #Break-up your implementation in mangeable steps
-#First-thing : I need a Chess Simulator
-#Okay, I installed a chess simulator called python-chess
 #Let's import the library because we will obviously use it
 
-import chess
+from nes_py.wrappers import JoypadSpace
+import gym_super_mario_bros
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT,RIGHT_ONLY,SIMPLE_MOVEMENT
+import gym
+from math import *
+from chessboard import display
 
-#Okay, I've imported the chess library
 #Now, I will proceed to import as many useful deep learning libraries within this program
 #I will also be conscious of the fact that I will need to analyze my experiments with this program
 #effectively, therefore a good set of visualization tools will be very useful
 
 #deep learning libraries
 import torch
+from IPython.display import clear_output
 from torch import nn
 from torch import optim
 import torch.nn.functional as F
+from torch.distributions import Categorical
+import torch.multiprocessing as mp
+from torch.nn.utils import parameters_to_vector
+from multiprocessing import Process
+from multiprocessing import set_start_method
 #Data-structure libraries:
 from collections import deque
 import numpy as np
 #Randomness Library:
 from random import shuffle
+import random
+import copy
+import sys
+
 
 #Plotting library
 #I can use the plotting library in order to visualize the probabilities of certain actions of the AI(Artificial Intelligence)
 import matplotlib.pyplot as plt
+import chess
 
 #Image-processing library:
 from skimage.transform import resize
@@ -38,12 +53,15 @@ from skimage.transform import resize
 class target_net(nn.Module):
     def __init__(self):
         super(target_net,self).__init__()
-        #3 Layer Deep Neural Network
-        self.conv1 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.conv2 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.conv3 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.linear = nn.Linear(3072,512)
+        #3 Layer Deep Neural Network(it's weights are frozen)
+        self.conv1 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.conv2 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.conv3 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.linear = nn.Linear(196,512)
     def forward(self,x):
+        encoded_board = utilities.encode_info(x)
+        encoded_board = torch.Tensor(encoded_board).reshape(1,8,8).to('cuda')
+        x = encoded_board
         x = F.normalize(x,dim=0)
         y = F.selu(self.conv1(x))
         y = F.selu(self.conv2(y))
@@ -56,14 +74,17 @@ class predictor_net(nn.Module):
     def __init__(self):
         super(predictor_net,self).__init__()
         #3 Layer Deep Neural Network(it's weights are not frozen)
-        self.conv1 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.conv2 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.conv3 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.linear = nn.Linear(3072,512)
+        self.conv1 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.conv2 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.conv3 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.linear = nn.Linear(196,512)
         self.linear2 = nn.Linear(512,512)
         self.linear3 = nn.Linear(512,512)
         
     def forward(self,x):
+        encoded_board = utilities.encode_info(x)
+        encoded_board = torch.Tensor(encoded_board).reshape(1,8,8).to('cuda')
+        x = encoded_board
         x = F.normalize(x,dim=0)
         y = F.selu(self.conv1(x))
         y = F.selu(self.conv2(y))
@@ -73,7 +94,7 @@ class predictor_net(nn.Module):
         y = self.linear3(y)
         return y
 
-def train_predictor(obs,predictor,target):
+def get_loss(obs,predictor,target):
     pred = predictor
     trg = target
     input_1 = obs
@@ -87,13 +108,17 @@ class decision_maker(nn.Module):
     #Initialization
     def __init__(self,aspace=12):
         super(decision_maker,self).__init__()
-        self.conv1 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.conv2 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.conv3 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.conv4 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.linear1 = nn.Linear(3072,512)
-        self.linear = nn.Linear(512,aspace)
+        self.conv1 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.conv2 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.conv3 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.conv4 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.linear1 = nn.Linear(256,512)
+        #Pick a piece(that is available)
+        self.pick = nn.Linear(512,64)
+        #Pick a location for the piece(that is available)
+        self.location = nn.Linear(512,64)
         self.action = None
+        self.action2 = None
         self.aspace = aspace
         self._initialize_weights()
 
@@ -106,9 +131,14 @@ class decision_maker(nn.Module):
         y = F.selu(self.conv4(y))
         #Use the sigmoid function
         y = F.selu(self.linear1(y.flatten()))
-        y = F.softmax(self.linear(y.flatten()))
-        self.action = np.random.choice(a=range(self.aspace),p=y.cpu().detach().numpy())
-        return y
+        y1 = y
+        y = F.softmax(self.pick(y1.flatten()))
+        y2 = F.softmax(self.location(y1.flatten()))
+        #Piece selected
+        self.action = np.random.choice(a=range(64),p=y.cpu().detach().numpy())
+        #Location selected
+        self.action2 = np.random.choice(a=range(64),p=y2.cpu().detach().numpy())
+        return y,y2
 
     def _initialize_weights(self):
         for module in self.modules():
@@ -122,11 +152,11 @@ class decision_maker(nn.Module):
 class Critic(nn.Module):
     def __init__(self):
         super(Critic,self).__init__()
-        self.conv1 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.conv2 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.conv3 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.conv4 = nn.Conv2d(3, 3, kernel_size = 3, padding = 1)
-        self.linear1 = nn.Linear(3072,512)
+        self.conv1 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.conv2 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.conv3 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.conv4 = nn.Conv2d(1, 1, kernel_size = 1, padding = 1)
+        self.linear1 = nn.Linear(256,512)
         #Outputs either true or false 
         self.linear = nn.Linear(512,1)
         
@@ -142,198 +172,114 @@ class Critic(nn.Module):
         y = F.sigmoid(self.linear(y.flatten()))
         return y
 
-#Generalized Option Module, with K options, and a critic function
+#Typical Advantage Actor Critic, but with planning enabled
 class ActorCritic(nn.Module):
     
-    def __init__(self,aspace=12,k_options=5):
+    def __init__(self):
         super(ActorCritic,self).__init__()
         self.action = None
-        self.aspace = aspace
-        self.k_options = k_options
+        self.action2 = None
         self.Critic = Critic().to('cuda').share_memory()
         self.Critic2 = Critic().to('cuda').share_memory()
+        self.critic = 0
+        self.critic2 = 0
+        self.AC = decision_maker(aspace=64).to('cuda').share_memory()
         self.optimizer1 = optim.Adam(self.Critic.parameters(),lr=1e-3)
         self.optimizer2 = optim.Adam(self.Critic2.parameters(),lr=1e-3)
-        self.Dynamics_net = dynamics_net().to('cuda').share_memory()
-        self.
-        self.Value_Sums = [0 for x in range(self.aspace)]
-        self.N_visits = 0
-        self.Action_Sample = [0 for x in range(self.aspace)]
+        self.optimizer3 = optim.Adam(list(self.AC.parameters()),lr=1e-4)
+        self.Value_Sums = [0 for x in range(64)]
+        self.Value_Sums2 = [0 for x in range(64)]
+        self.Action_Sample = [0 for x in range(64)]
+        self.Action_Sample2 = [0 for x in range(64)]
         self.C = float(2 ** 0.5)
+        self.prob1 = 0
+        self.prob2 = 0
         self.best_node = None
-        self.optimizer4 = optim.Adam(self.Controller.parameters(),lr=1e-4)
+        self.N_visits = 0
         self.planning = True
         self.ucb_scores = None
+        self.ucb_scores2 = None
+        self.First_Time = True
+        self.steps = 0
+        self.maxsteps = 5
 
-    def get_ucb(self,value,visits,samples,c):
-        if samples == 0 or visits == 0:
+    def get_ucb(self,value,visits,samples,prior):
+        if samples == 0:
             return float('inf')
         else:
-            ucb = (value/samples) + c * sqrt((log(visits)/samples))
+            ucb = (value/samples) + prior * sqrt(2) * sqrt(visits)/(samples+1)
             return ucb
-
-    #Options keep running once selected, until they get terminated
-    #Other options get selected when the previous options gets terminated
-    def forward(self,x,planning = True):
+    
+    def forward(self,x):
         #Now, time to implement the planning stage...
-
+        env1 = x.copy()
         #If planning is enabled:
-        if self.planning == True:
-            if self.running == False:
-                x = self.Repr(x).reshape(3,32,32).detach()
-                self.representation = x
-                probs2 = self.Controller(x)
-                self.decision = self.Controller.action
-                #Now, we have selected an option, time to use it
-                self.Option_ = self.Options[self.decision]
-                self.optimizer3 = optim.Adam(list(self.Option_.parameters())+list(self.Repr.parameters())+list(self.MasterPlanner.parameters()),lr=1e-4)
-                probs_ = self.Option_.Decider(x)
-                #Initially, the Controller can override the initial termination
-                self.running = True
-                self.action = self.Option_.Decider.action
-                critic = self.Critic(x)
-                critic2 = self.Critic2(x)
-                #Next hidden state prediction
-                expected_rewards = []
-                self.action = self.Option_.Decider.action
-                self.Initial_Probs = probs_
-                ucb_scores = []
-                for i in range(self.aspace):
-                    action_vector = torch.zeros(32,32)
-                    action_vector[0][i] = True
-                    reward_inpt_ = deque([self.representation[0].cpu(),self.representation[1].cpu(),self.representation[2].cpu(),action_vector],maxlen=4)
-                    reward_inpt = torch.Tensor(np.array(reward_inpt_))
-                    #Expected extrinsic and intrinsic reward
-                    expected_rwrd = self.Reward_Net(reward_inpt.to('cuda'))
-                    self.Value_Sums[i] += expected_rwrd[0].item() + expected_rwrd[1].item()
-                    ucb_score = self.get_ucb(self.Value_Sums[i],self.N_visits,self.Action_Sample[i],self.C)
-                    ucb_scores.append(ucb_score)
-                    expected_rewards.append(expected_rwrd)
-                self.ucb_scores = ucb_scores
-                self.Initial_Controller_Probs = probs2
-                self.Initial_Critics_E.append(critic)
-                self.Initial_Critics_I.append(critic2)
-                action = np.argmax(np.array(ucb_scores))
-                self.Action_Sample[action] += 1
-                self.N_visits += 1
-                #Copy this initial set of decisions
-                #After processing all the expected rewards, it's time to compute the nodes running sums(How good the imagined line is)
-                action_vector = torch.zeros(32,32)
-                action_vector[0][action] = True
-                dynamics_inpt_ = deque([self.representation[0].cpu(),self.representation[1].cpu(),self.representation[2].cpu(),action_vector],maxlen=4)
-                dynamics_inpt = torch.Tensor(np.array(dynamics_inpt_))
-                dynamics_inpt[-1] = action_vector
-                x_next = self.Dynamics_net(dynamics_inpt.to('cuda'))
-                self.steps += 1
-                self.forward(x_next.reshape(3,32,32),self.planning)
-            else:
-                x = self.Repr(x).reshape(3,32,32).detach().to('cuda')
-                self.representation = x
-                probs = self.Option_(x)
-                probs_1 = self.Option_.Decider(x)
-                self.MasterPlanner(x)
-                end = self.MasterPlanner.action
-                critic = self.Critic(x)
-                critic2 = self.Critic2(x)
-                if self.Option_.action == None and end == 1:
-                    #select a new option
-                    probs2 = self.Controller(x)
-                    self.decision = self.Controller.action
-                    #Now, we have selected an option, time to use it
-                    self.Option_ = self.Options[self.decision]
-                    self.optimizer3 = optim.Adam(list(self.Option_.parameters())+list(self.Repr.parameters())+list(self.MasterPlanner.parameters()),lr=1e-4)
-                    probs = self.Option_.Decider(x)
-                    if self.run_again == True:
-                        self.Initial_Probs = probs
-                        self.Initial_Controller_Probs = probs2
-                        self.run_again = False
-                    #Initially, the Controller can override the initial termination
-                    self.action = self.Option_.Decider.action
-                    expected_rewards = []
-                    ucb_scores = []
-                    for i in range(self.aspace):
-                        action_vector = torch.zeros(32,32)
-                        action_vector[0][i] = True
-                        reward_inpt_ = deque([self.representation[0].cpu(),self.representation[1].cpu(),self.representation[2].cpu(),action_vector],maxlen=4)
-                        reward_inpt = torch.Tensor(np.array(reward_inpt_))
-                        #Expected extrinsic and intrinsic reward
-                        expected_rwrd = self.Reward_Net(reward_inpt.to('cuda'))
-                        self.Value_Sums[i] += expected_rwrd[0].item() + expected_rwrd[1].item()
-                        ucb_score = self.get_ucb(self.Value_Sums[i],self.N_visits,self.Action_Sample[i],self.C)
-                        ucb_scores.append(ucb_score)
-                        expected_rewards.append(expected_rwrd)
-                    self.ucb_scores = ucb_scores
-                    action = np.argmax(np.array(ucb_scores))
-                    #Copy this initial set of decisions
-                    #After processing all the expected rewards, it's time to compute the nodes running sums(How good the imagined line is)
-                    self.Action_Sample[action] += 1
-                    self.N_visits += 1
-                    action_vector = torch.zeros(32,32)
-                    action_vector[0][action] = True
-                    dynamics_inpt_ = deque([self.representation[0].cpu(),self.representation[1].cpu(),self.representation[2].cpu(),action_vector],maxlen=4)
-                    dynamics_inpt = torch.Tensor(np.array(dynamics_inpt_))
-                    dynamics_inpt[-1] = action_vector
-                    x_next = self.Dynamics_net(dynamics_inpt.to('cuda'))
-                    self.steps += 1
-                    self.forward(x_next.reshape(3,32,32),self.planning)
-
-                elif self.Option_.action != None and end == 1:
-                    self.action = self.Option_.action
-                    expected_rewards = []
-                    ucb_scores = []
-                    if self.run_again == True:
-                        self.Initial_Probs = probs
-                        self.run_again = False
-                    for i in range(self.aspace):
-                        action_vector = torch.zeros(32,32)
-                        action_vector[0][i] = True
-                        reward_inpt_ = deque([self.representation[0].cpu(),self.representation[1].cpu(),self.representation[2].cpu(),action_vector],maxlen=4)
-                        reward_inpt = torch.Tensor(np.array(reward_inpt_))
-                        #Expected extrinsic and intrinsic reward
-                        expected_rwrd = self.Reward_Net(reward_inpt.to('cuda'))
-                        self.Value_Sums[i] += expected_rwrd[0].item() + expected_rwrd[1].item()
-                        ucb_score = self.get_ucb(self.Value_Sums[i],self.N_visits,self.Action_Sample[i],self.C)
-                        ucb_scores.append(ucb_score)
-                        expected_rewards.append(expected_rwrd)
-                    self.ucb_scores = ucb_scores
-                    action = np.argmax(np.array(ucb_scores))
-                    self.N_visits += 1
-                    #Copy this initial set of decisions
-                    #After processing all the expected rewards, it's time to compute the nodes running sums(How good the imagined line is)
-                    self.Action_Sample[action] += 1
-                    action_vector = torch.zeros(32,32)
-                    action_vector[0][action] = True
-                    dynamics_inpt_ = deque([self.representation[0].cpu(),self.representation[1].cpu(),self.representation[2].cpu(),action_vector],maxlen=4)
-                    dynamics_inpt = torch.Tensor(np.array(dynamics_inpt_))
-                    dynamics_inpt[-1] = action_vector
-                    x_next = self.Dynamics_net(dynamics_inpt.to('cuda'))
-                    self.steps += 1
-                    self.forward(x_next.reshape(3,32,32),self.planning)
-                else:
-                    self.best_node = np.argmax(np.array(self.ucb_scores))
-                    best_node = np.random.choice(a=range(self.aspace),p=self.Initial_Probs.cpu().detach().numpy())
-                    best_value = self.Value_Sums[self.best_node]
-                    #Select the best action
-                    best_action = best_node
-                    self.action = best_node
-                    #Select the best action's probability
-                    probs = self.Initial_Probs
-                    self.probs__ = probs
-                    #Select the Critic of that state:
-                    critic = self.Initial_Critics_E[0]
-                    critic2 = self.Initial_Critics_I[0]
-                    self.critic_ = critic
-                    self.critic__ = critic2
-                    self.Controller_probs = self.Initial_Controller_Probs
-                    self.planning = False
-                    
-        if self.planning == False:
-            self.Value_Sums = [0 for x in range(self.aspace)]
+        if self.planning == True and self.steps < self.maxsteps and not env1.is_checkmate() and not env1.is_stalemate() and not env1.is_insufficient_material() and not env1.is_seventyfive_moves() and not env1.is_fivefold_repetition() and not env1.can_claim_draw():
+            encoded_board = utilities.encode_info(env1)
+            encoded_board = torch.Tensor(encoded_board).reshape(1,8,8).to('cuda')
+            probs,probs2 = self.AC(encoded_board)
+            self.prob1 = probs
+            self.prob2 = probs2
+            critic = self.Critic(encoded_board)
+            critic2 = self.Critic2(encoded_board)
+            self.critic = critic
+            self.critic2 = critic2
+            ucb_scores = []
+            ucb_scores2 = []
+            #Use the priors
+            for i in range(64):
+                self.Value_Sums[i] += critic.item() + critic2.item()
+                ucb_score = self.get_ucb(self.Value_Sums[i],self.N_visits,self.Action_Sample[i],probs[i].item())
+                ucb_scores.append(ucb_score)
+            for i in range(64):
+                self.Value_Sums2[i] += critic.item() + critic2.item()
+                ucb_score = self.get_ucb(self.Value_Sums2[i],self.N_visits,self.Action_Sample2[i],probs2[i].item())
+                ucb_scores2.append(ucb_score)
+            self.ucb_scores = ucb_scores
+            self.ucb_scores2 = ucb_scores2
+            legal = False
+            does_exist = False
+            does_exist2 = False
+            legal_moves = list(env1.legal_moves)
+            while not legal:
+                action = np.argmax(np.array(ucb_scores)) + 1
+                action2 = np.argmax(np.array(ucb_scores2)) + 1
+                curr_location = utilities.encode_legalmove(action)
+                next_location = utilities.encode_legalmove(action2)
+                combined_move = curr_location + next_location
+                for move in legal_moves:
+                    move = str(move)
+                    if move == combined_move:
+                        legal = True
+                        break
+                    if move[:2] == curr_location:
+                        does_exist = True
+                    elif move[2:] == next_location:
+                        does_exist2 = True
+                if does_exist == False:
+                    ucb_scores[action-1] = -float('inf')
+                elif does_exist2 == False:
+                    ucb_scores2[action2-1] = -float('inf')
+                if does_exist == True and does_exist2 == True:
+                    ucb_scores[action-1] = -float('inf')
+                does_exist = False
+                does_exist2 = False
+            #Whatever is left, is a legal move
+            self.Action_Sample[action-1] += 1
+            self.Action_Sample2[action2-1] += 1
+            self.N_visits += 1
+            self.steps += 1
+            if self.First_Time == True:
+                self.action = action
+                self.action2 = action2
+                self.First_Time = False
+            #Play the move
+            env1.push_uci(combined_move)
+            self.forward(env1)
+        else:
+            self.planning = False
             self.steps = 0
-            self.N_visits = 0
-            self.Action_Sample = [0 for x in range(self.aspace)]
-            self.run_again = True
-            return self.probs__,self.critic_,self.critic__
+        return self.prob1,self.prob2,self.critic,self.critic2
             
     #Now, change the loss function
     def loss(self,prob1,old_prob,adv,eps=0.2):
@@ -343,8 +289,7 @@ class ActorCritic(nn.Module):
         loss = min(comp1,comp2)
         return loss
 
-board = chess.Board()
-
+#Utility function in order to encode the chess board and also decode the chessboard
 #Utility function in order to encode the chess board and also decode the chessboard
 class utilities:
 
@@ -354,7 +299,7 @@ class utilities:
         pieces_selected = []
         found_piece = 0
         counta = 1
-        for i in range(63):
+        for i in range(64):
             piece = chessboard.piece_at(i)
             if str(piece) not in pieces_selected:
                 pieces_selected.append(str(piece))
@@ -375,7 +320,7 @@ class utilities:
         found_piece = 0
         counta = 1
         total_count = 13
-        for i in range(63):
+        for i in range(64):
             piece = chessboard.piece_at(i)
             if str(piece) not in pieces_selected:
                 cnter += 1
@@ -390,6 +335,59 @@ class utilities:
         for v in encoded:
             decoded.append(skeleton[v-1])
         return decoded
+
+    def decode_legalmove(move):
+        dict1 = { 'a' : 1, 'b' : 2, 'c' : 3, 'd' : 4, 'e' : 5, 'f' : 6, 'g' : 7, 'h' : 8}
+        relative_location = int(dict1[move[0]]) * int(move[1])
+        relative_location2 = int(dict1[move[2]]) * int(move[3])
+        return relative_location,relative_location2
+
+    def decode_legalpos(pos):
+        dict1 = { 'a' : 1, 'b' : 2, 'c' : 3, 'd' : 4, 'e' : 5, 'f' : 6, 'g' : 7, 'h' : 8}
+        relative_location = int(dict1[pos[0]]) * int(pos[1])
+        return relative_location
+
+    def encode_legalmove(decoded):
+        subtract = 9
+        amount = 1
+        dict1 = { 1 : 'a', 2 : 'b', 3 : 'c', 4 : 'd', 5 : 'e', 6 : 'f', 7 : 'g' , 8 : 'h' }
+        last_stand = 0
+        letter_pos = 0
+        encoded_pos = ""
+        times = 1
+        if decoded == 0:
+            return -1
+        while decoded >= 0:
+            last_stand = decoded
+            decoded -= 8
+            if decoded <= 0:
+                break
+            else:
+                times += 1
+        while last_stand >= 0:
+            last_stand -= 1
+            if last_stand < 0:
+                break
+            else:
+                letter_pos += 1
+        encoded_pos = dict1[letter_pos] + str(times)
+        return encoded_pos
+        
+    def moves_for_piece(legal_moves,board,selected_piece,turn1):
+        moves_for_piece = []
+        initial_position = []
+        pieces = utilities.get_skeleton(board)
+        if turn1 == True:
+            actual_piece = pieces[selected_piece]
+        elif turn1 == False:
+            actual_piece = pieces[selected_piece + 7]
+        for move in legal_moves:
+            pos1,pos2 = utilities.decode_legalmove(move.uci())
+            piece1 = board.piece_at(pos1-1)
+            if str(piece1) == str(actual_piece):
+                initial_position.append(pos1)
+                moves_for_piece.append(pos2)
+        return initial_position,moves_for_piece
 
 #**Clean Up the Traning Function
 #**In the process of cleaning it up
@@ -436,116 +434,81 @@ def train(epochs,AC,pred,target,Counter):
     dynamic_outputs = []
     representations = []
     dynamics_losses = []
+    action_probs = []
+    action_probs2 = []
     actions = []
     best_nodes = []
     losses = []
     
     updated_parameters = False
     next_time = False
-    
+
+    done = False
     lossfn = nn.MSELoss()
     lossfn2 = nn.CrossEntropyLoss()
     
     curiosity = optim.Adam(pred.parameters(),lr=1e-4)
-    
     #prev_lives = env.ale.lives()
     while epoch_counter != epochs:
         #Get the probabilities and critic value from the Actor Critic
-        probs,critic_,critic_2 = AC(dynamic_inpt.to('cuda'),True)
-        best_nodes.append(OC.best_node)
-        OC.planning = True
-        actions.append(OC.action)
-        #Get the next hidden state prediction:
-        representations.append(OC.Repr(dynamic_inpt.to('cuda')).reshape(3,32,32).detach())
+        probs,probs2,critic_,critic_2 = AC(env)
+        action1 = AC.action
+        action2 = AC.action2
+        curr_location = utilities.encode_legalmove(action1)
+        next_location = utilities.encode_legalmove(action2)
+        combined_move = curr_location + next_location
+        env.push_uci(combined_move)
+        display.start(env.fen())
         
-        #Action is already selected
-        action1 = OC.action
-        #Execute the action
-        img, reward, done, info = env.step(action1)
-        env.render()
-        
-        action_vector = torch.zeros(32,32)
-        action_vector[0][action1] = True
-        #Just going to borrow the dynamic inpt data :
-        rn_input[3] = action_vector
-        rn_input[0] = OC.Repr(dynamic_inpt.to('cuda')).reshape(3,32,32)[0].detach().cpu()
-        rn_input[1] = OC.Repr(dynamic_inpt.to('cuda')).reshape(3,32,32)[1].detach().cpu()
-        rn_input[2] = OC.Repr(dynamic_inpt.to('cuda')).reshape(3,32,32)[2].detach().cpu()
-        rn_inpt = torch.Tensor(np.array(rn_input))
-        expected_rew = OC.Reward_net(rn_inpt.to('cuda'))
-        expected_rewards.append(expected_rew)
-
-        dynamics_inpt[3] = action_vector
-        dynamics_inpt[0] = OC.Repr(dynamic_inpt.to('cuda')).reshape(3,32,32)[0].detach().cpu()
-        dynamics_inpt[1] = OC.Repr(dynamic_inpt.to('cuda')).reshape(3,32,32)[1].detach().cpu()
-        dynamics_inpt[2] = OC.Repr(dynamic_inpt.to('cuda')).reshape(3,32,32)[2].detach().cpu()
-        dynamic_output = OC.Dynamics_net(dynamics_inpt.to('cuda'))
-        dynamic_outputs.append(dynamic_output)
-        
-        actions_taken.append(action1)
-        
-        #plt.bar(support,critic_[action1].detach().numpy())
-        #plt.savefig("Actions(Extrinsic)(SuperMarioBros)/" + str(env.get_action_meanings()[action1]) + ".png")
-        #plt.clf()
-        #plt.bar(support2,critic_2[action1].detach().numpy())
-        #plt.savefig("Actions(Intrinsic)(SuperMarioBros)/" + str(env.get_action_meanings()[action1]) + ".png")
-        #plt.clf()
+        AC.planning = True
+        AC.First_Time = True
         
         critics.append(critic_)
         critics2.append(critic_2)
         
-        curr_prob = probs[action1]
+        curr_prob = probs[action1-1]
+        action_probs.append(probs)
+        curr_prob2 = probs2[action2-1]
+        action_probs2.append(probs2)
+        
         curr_probs.append(curr_prob)
-
-        #Controller:
-        curr_prob2 = OC.Controller_probs[OC.decision]
         curr_probs2.append(curr_prob2)
         
         entropy = Categorical(probs).entropy()
         entropies.append(entropy)
-        
-        entropy2 = Categorical(OC.Controller_probs).entropy()
+
+        entropy2 = Categorical(probs2).entropy()
         entropies2.append(entropy2)
         
-        state = dynamic_inpt
-        prob_actions.append(probs[action1])
-        state = dynamic_inpt
-        dynamic_movement.append(downscale_obs(img))
-        dynamic_inpt = torch.Tensor(np.array(dynamic_movement))
-        state2 = dynamic_inpt
-        
-        loss = train_predictor(dynamic_inpt,pred,target)
+        loss = get_loss(env,pred,target)
         i_reward = loss
         
         episode_length += 1
         lifespan += 1
 
-        if episode_length == maxlength:
+        if env.is_checkmate() or env.is_stalemate() or env.is_insufficient_material() or env.is_seventyfive_moves() or env.is_fivefold_repetition() or env.can_claim_draw():
             done = True
-    
-        elif not done: #and not env.ale.lives() < prev_lives and reward != 0:
-            rewards.append(torch.sigmoid(torch.Tensor([reward])))
+
+        elif not done:
             losses.append(float(i_reward))
-            net_reward += i_reward.item()
-            net_reward += reward
             
-        if done: #or env.ale.lives() < prev_lives:
-            rewards.append(torch.sigmoid(torch.Tensor([-1])))
+        if done:
+
+            if env.turn == True and env.is_checkmate():
+                for i in range(len(critics2)):
+                    rewards.append(0.05)
+            elif env.turn == False and env.is_checkmate():
+                for i in range(len(critics2)):
+                    rewards.append(+1)
+            if env.is_stalemate() or env.is_insufficient_material() or env.is_seventyfive_moves() or env.is_fivefold_repetition() or env.can_claim_draw():
+                for i in range(len(critics2)):
+                    rewards.append(0.05)
+            
             losses.append(0)
-            net_reward += (-done)
             epoch_counter += 1
             Counter.value += 1
-            #if done:
-            img = env.reset()
-            img2 = downscale_obs(img)
-            dynamic_movement = deque([img2,img2,img2],maxlen=3)
-            dynamic_inpt = torch.Tensor(np.array(dynamic_movement))
             episode_length = 0
             ppo_loss = 0
-            controller_loss = 0
-            rn_loss = 0
-            mcts_loss = 0
-            dynamics_loss = 0
             i_loss = torch.Tensor([0])
             e_loss = torch.Tensor([0])
             i_ = len(critics) - 1
@@ -555,141 +518,98 @@ def train(epochs,AC,pred,target,Counter):
             Return = 0
             Return2 = 0
             b = 0
-            #prev_lives = env.ale.lives()
+            env.reset()
+            
             if updated_parameters == False:
                 for i in range(len(curr_probs)):
                     old_probs.append(curr_probs[i])
-                for i in range(len(curr_probs2)):
+                for i in range(len(curr_probs)):
                     old_probs2.append(curr_probs2[i])
 
             #Compute the PPO Los,the Intrinsic Loss and the Extrinsic Loss
             
-            for critic1 in reversed(critics):
-                #Turned off extrinsic rewards...
+            for critic1 in reversed(critics2):
+                
                 #Calculate the actual net return
-                Return = Return * gamma2 ** b + rewards[i_]  
-                Return2 = Return2 * gamma ** b + torch.Tensor([losses[i_]]) 
+                Return = Return * gamma2 ** b + torch.Tensor([rewards[i_]]).to('cuda')
+                Return2 = Return2 * gamma ** b + torch.Tensor([losses[i_]]).to('cuda')
                 
                 #Calculate the cumulative expected return
-                expected_return = expected_return * gamma2 ** b + expected_rewards[i_][0]
-                expected_return2 = expected_return2 * gamma ** b + expected_rewards[i_][1]
+                expected_return = expected_return * gamma2 ** b + critic1
+                expected_return2 = expected_return2 * gamma ** b + critics2[i_]
                 
-                adv = (expected_return.cpu() - Return) + (expected_return2.detach().cpu() - Return2)
+                Action_Vector = torch.zeros(64)
+                Action_Vector[action1-1] = True
+                Action_Vector2 = torch.zeros(64)
+                Action_Vector2[action2-1] = True
+                ppo_loss += lossfn2(action_probs[i_].cpu(),Action_Vector.cpu())
+                ppo_loss += lossfn2(action_probs2[i_].cpu(),Action_Vector2.cpu())
                 
-                controller_loss += OC.loss(curr_probs2[i_],old_probs2[i_],adv.to('cuda')).detach() - 0.01 * entropies2[i_].detach()
-                action_vector = torch.zeros(32,32)
-                action_vector[0][actions[i_]] = True
-                action_vector2 = torch.zeros(32,32)
-                action_vector2[0][best_nodes[i_]] = True
-                mcts_loss += lossfn2(action_vector,action_vector2)
+                e_loss += lossfn(expected_return.cpu(),Return.cpu()).detach()
+                i_loss += lossfn(expected_return2.cpu(),Return2.cpu()).detach()
                 
                 i_ -= 1
                 b += 1
 
             i_ = 0
 
-            #Teach the Reward Network
-            for reward in rewards:
-                actual_reward_vector = torch.Tensor([reward,losses[i_]]).to('cuda')
-                rn_loss += lossfn(expected_rewards[i_],actual_reward_vector)
-                i_ += 1
-            i_ = 0
-            #Teach the Dynamics Network
-            for i in range(len(representations)):
-                #Make sure to correctly model the representation:
-                if i + 1 <= len(representations) - 1:
-                    dynamics_loss += lossfn(dynamic_outputs[i].reshape(3072),representations[i+1].reshape(3072).detach())
-
-            if high_score < net_reward:
-                high_score = net_reward
-                maxlength = int(high_score) + 15
-
             losses = F.normalize(torch.Tensor(losses),dim=0)
+            AC.Action_Sample = [0 for x in range(64)]
+            AC.Action_Sample2 = [0 for x in range(64)]
+            AC.Value_Sum = [0 for x in range(64)]
+            AC.Value_Sum2 = [0 for x in range(64)]
+            AC.N_visits = 0
+            
             for loss_ in losses:
                 loss_.requires_grad = True
                 loss2 += loss_
 
             old_probs = curr_probs
             old_probs2 = curr_probs2
-            controller_losses.append(controller_loss.item())
-            ppo_loss += mcts_loss
+            
             ppo_losses.append(ppo_loss.item())
-            rn_losses.append(rn_loss.item())
+
             extrinsic_returns.append(Return)
             intrinsic_returns.append(Return2)
-            dynamics_losses.append(dynamics_loss.cpu().detach().numpy())
             
             plt.plot(ppo_losses)
             plt.savefig("PPO Loss.png")
             plt.clf()
             
-            plt.plot(controller_losses)
-            plt.savefig('Controller Loss.png')
-            plt.clf()
-            
-            plt.plot(losses[:len(losses)-1].detach().numpy())
-            plt.savefig("Curiosity Spikes.png")
-            plt.clf()
-            
-            plt.plot(extrinsic_returns)
-            plt.savefig("Extrinsic Returns.png")
-            plt.clf()
-            
-            plt.plot(intrinsic_returns)
-            plt.savefig("Intrinsic Returns.png")
-            plt.clf()
-
-            plt.plot(rn_losses)
-            plt.savefig("Reward Network Loss.png")
-            plt.clf()
-
-            plt.plot(dynamics_losses)
-            plt.savefig("Dynamics Network Loss.png")
-            plt.clf()
-            
             #Optimization Stage:
-            OC.optimizer3.zero_grad()
-            ppo_loss.requires_grad = True
+            AC.optimizer3.zero_grad()
             ppo_loss.backward()
-            OC.optimizer3.step()
-
-            OC.optimizer4.zero_grad()
-            controller_loss.requires_grad = True
-            controller_loss.backward()
-            OC.optimizer4.step()
+            AC.optimizer3.step()
             
             curiosity.zero_grad()
             loss2.backward()
             curiosity.step()
 
-            Reward_optimizer.zero_grad()
-            rn_loss.backward()
-            Reward_optimizer.step()
+            AC.optimizer1.zero_grad()
+            e_loss.requires_grad = True
+            e_loss.backward()
+            AC.optimizer1.step()
 
-            dynamic_optimizer.zero_grad()
-            dynamics_loss.backward()
-            dynamic_optimizer.step()
+            AC.optimizer2.zero_grad()
+            i_loss.requires_grad = True
+            i_loss.backward()
+            AC.optimizer2.step()
 
             #Reset Stage:
             curr_probs.clear()
             curr_probs2.clear()
+            
             critics.clear()
             critics2.clear()
-            prob_actions.clear()
-            rewards.clear()
-            rewards2.clear()
+            
             losses = []
             entropies.clear()
             entropies2.clear()
-            actions_taken.clear()
-            expected_rewards.clear()
-            dynamic_outputs.clear()
-            actions.clear()
-            best_nodes.clear()
+            action_probs.clear()
+            action_probs2.clear()
             net_reward = 0
-            representations.clear()
             updated_parameters = True
-            next_time = False
+            done = False
             
             print("Epoch:" + str(epoch_counter))
 
@@ -721,21 +641,11 @@ def test(OptionCritic1,world,level):
 processes = []
 if __name__ == "__main__":
     epochs = 5000
-    OptionCritic1 = OptionCritic(aspace=12,k_options=1).to('cuda')
-    pred = predictor_net()
-    target = target_net()
-    OptionCritic1.share_memory()
+    AC = ActorCritic().to('cuda')
+    pred = predictor_net().to('cuda')
+    target = target_net().to('cuda')
+    AC.share_memory()
     pred.share_memory()
     target.share_memory()
     Counter = mp.Value('f',0)
-    world = 3
-    level = 3
-    train(epochs,OptionCritic1,pred,target,Counter,world,level)
-    for i in range(0):
-        p = mp.Process(target=train,args=(epochs,OptionCritic1,pred,target,Counter,world,level)) 
-        p.start()
-        processes.append(p)
-    for p in processes: 
-        p.join()
-    for p in processes: 
-        p.terminate()
+    train(epochs,AC,pred,target,Counter)
