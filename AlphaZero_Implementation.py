@@ -1,4 +1,5 @@
 #Implementation of the AlphaZero Algorithm
+#Project: Completed!
 #By Victor Habiyambere
 #Started: June 9th, 2024
 #2024-06-09
@@ -214,7 +215,7 @@ class ActorCritic(nn.Module):
         #Now, time to implement the planning stage...
         env1 = x.copy()
         #If planning is enabled:
-        if self.planning == True and self.steps < self.maxsteps and not env1.is_checkmate() and not env1.is_stalemate() and not env1.is_insufficient_material() and not env1.is_seventyfive_moves() and not env1.is_fivefold_repetition() and not env1.can_claim_draw():
+        if self.planning == True and self.steps < self.maxsteps and not env1.is_checkmate() and not env1.is_stalemate() and not env1.is_insufficient_material() and not env1.is_seventyfive_moves() and not env1.is_fivefold_repetition() and not env1.can_claim_draw() and not list(env1.legal_moves) == []:
             encoded_board = utilities.encode_info(env1)
             encoded_board = torch.Tensor(encoded_board).reshape(1,8,8).to('cuda')
             probs,probs2 = self.AC(encoded_board)
@@ -241,6 +242,8 @@ class ActorCritic(nn.Module):
             does_exist = False
             does_exist2 = False
             legal_moves = list(env1.legal_moves)
+            for i in range(len(legal_moves)):
+                legal_moves[i] = str(legal_moves[i])
             while not legal:
                 action = np.argmax(np.array(ucb_scores)) + 1
                 action2 = np.argmax(np.array(ucb_scores2)) + 1
@@ -248,8 +251,7 @@ class ActorCritic(nn.Module):
                 next_location = utilities.encode_legalmove(action2)
                 combined_move = curr_location + next_location
                 for move in legal_moves:
-                    move = str(move)
-                    if move == combined_move:
+                    if combined_move in legal_moves:
                         legal = True
                         break
                     if move[:2] == curr_location:
@@ -264,18 +266,19 @@ class ActorCritic(nn.Module):
                     ucb_scores[action-1] = -float('inf')
                 does_exist = False
                 does_exist2 = False
-            #Whatever is left, is a legal move
-            self.Action_Sample[action-1] += 1
-            self.Action_Sample2[action2-1] += 1
-            self.N_visits += 1
-            self.steps += 1
-            if self.First_Time == True:
-                self.action = action
-                self.action2 = action2
-                self.First_Time = False
-            #Play the move
-            env1.push_uci(combined_move)
-            self.forward(env1)
+            if legal == True:
+                #Whatever is left, is a legal move
+                self.Action_Sample[action-1] += 1
+                self.Action_Sample2[action2-1] += 1
+                self.N_visits += 1
+                self.steps += 1
+                if self.First_Time == True:
+                    self.action = action
+                    self.action2 = action2
+                    self.First_Time = False
+                #Play the move
+                env1.push_uci(combined_move)
+                self.forward(env1)
         else:
             self.planning = False
             self.steps = 0
@@ -389,11 +392,117 @@ class utilities:
                 moves_for_piece.append(pos2)
         return initial_position,moves_for_piece
 
+#Implemented a tournament system, in order to ensure continual improvement:
+def tournament(prev_AC,curr_AC,env):
+    
+    #Get the probabilities and critic value from the Actor Critic
+    print("TOURNAMENT TIME!!!")
+    thresold_fraction = 10
+    best_AC = None
+    win = 0
+    loss = 0
+    draws = 0
+    win_ratio = 0
+    t = 0
+    done = False
+    env2 = env.copy()
+    env2.reset()
+    while win_ratio <= 0.55 and t < thresold_fraction:
+
+        if env2.is_checkmate() or env2.is_stalemate() or env2.is_insufficient_material() or env2.is_seventyfive_moves() or env2.is_fivefold_repetition() or env2.can_claim_draw() or list(env2.legal_moves) == []:
+            done = True
+
+        if done:
+            outcome = env2.outcome()
+            if outcome != None and outcome.winner == True:
+                loss += 1
+            elif outcome != None and outcome.winner == False:
+                win += 1
+            else:
+                draws += 1
+            win_ratio = float(win/(loss + win + draws))
+            t += 1
+            env2.reset()
+            done = False
+
+        prev_AC.planning = True
+        
+        probs,probs2,critic_,critic_2 = prev_AC(env2)
+        action1 = prev_AC.action
+        action2 = prev_AC.action2
+        curr_location = utilities.encode_legalmove(action1)
+        next_location = utilities.encode_legalmove(action2)
+        combined_move = curr_location + next_location
+        env2.push_uci(combined_move)
+
+        prev_AC.First_Time = True
+
+        if env2.is_checkmate() or env2.is_stalemate() or env2.is_insufficient_material() or env2.is_seventyfive_moves() or env2.is_fivefold_repetition() or env2.can_claim_draw() or list(env2.legal_moves) == []:
+            done = True
+        
+        if done:
+            outcome = env2.outcome()
+            if outcome != None and outcome.winner == True:
+                loss += 1
+            elif outcome != None and outcome.winner == False:
+                win += 1
+            else:
+                draws += 1
+            win_ratio = float(win/(loss + win + draws))
+            t += 1
+            env2.reset()
+            done = False
+
+        curr_AC.planning = True
+        
+        probs,probs2,critic_,critic_2 = curr_AC(env2)
+        action_1 = curr_AC.action
+        action_2 = curr_AC.action2
+        curr_location = utilities.encode_legalmove(action_1)
+        next_location = utilities.encode_legalmove(action_2)
+        combined_move = curr_location + next_location
+        legal_moves = list(env2.legal_moves)
+        env2.push_uci(combined_move)
+
+        curr_AC.First_Time = True
+        
+        if env2.is_checkmate() or env2.is_stalemate() or env2.is_insufficient_material() or env2.is_seventyfive_moves() or env2.is_fivefold_repetition() or env2.can_claim_draw() or len(list(env2.legal_moves)) == 0:
+            done = True
+
+        if done:
+            outcome = env2.outcome()
+            if outcome != None and outcome.winner == True:
+                loss += 1
+            elif outcome != None and outcome.winner == False:
+                win += 1
+            else:
+                draws += 1
+            win_ratio = float(win/(loss + win + draws))
+            t += 1
+            env2.reset()
+            done = False
+            
+    if win_ratio >= 0.55:
+        print("TOURNAMENT COMPLETED! IMPROVEMENT ACHIEVED!")
+        curr_AC.planning = True
+        curr_AC.First_Time = True
+        return curr_AC
+    else:
+        print("TOURNAMENT COMPLETED! NO IMPROVEMENT ACHIEVED!")
+        prev_AC.planning = True
+        prev_AC.First_Time = True
+        return prev_AC
+            
 #**Clean Up the Traning Function
 #**In the process of cleaning it up
 def train(epochs,AC,pred,target,Counter):
     
     env = chess.Board()
+    best_AC = AC
+    prev_AC = ActorCritic()
+    wins = 0
+    losses = 0
+    win_ratio = 0
 
     gamma = 0.9 #C
     gamma2 = 0.99
@@ -452,13 +561,13 @@ def train(epochs,AC,pred,target,Counter):
     while epoch_counter != epochs:
         #Get the probabilities and critic value from the Actor Critic
         probs,probs2,critic_,critic_2 = AC(env)
+        prev_AC = AC
         action1 = AC.action
         action2 = AC.action2
         curr_location = utilities.encode_legalmove(action1)
         next_location = utilities.encode_legalmove(action2)
         combined_move = curr_location + next_location
         env.push_uci(combined_move)
-        display.start(env.fen())
         
         AC.planning = True
         AC.First_Time = True
@@ -486,7 +595,7 @@ def train(epochs,AC,pred,target,Counter):
         episode_length += 1
         lifespan += 1
 
-        if env.is_checkmate() or env.is_stalemate() or env.is_insufficient_material() or env.is_seventyfive_moves() or env.is_fivefold_repetition() or env.can_claim_draw():
+        if env.is_checkmate() or env.is_stalemate() or env.is_insufficient_material() or env.is_seventyfive_moves() or env.is_fivefold_repetition() or env.can_claim_draw() or list(env.legal_moves) == []:
             done = True
 
         elif not done:
@@ -500,10 +609,10 @@ def train(epochs,AC,pred,target,Counter):
             elif env.turn == False and env.is_checkmate():
                 for i in range(len(critics2)):
                     rewards.append(+1)
-            if env.is_stalemate() or env.is_insufficient_material() or env.is_seventyfive_moves() or env.is_fivefold_repetition() or env.can_claim_draw():
+            if env.is_stalemate() or env.is_insufficient_material() or env.is_seventyfive_moves() or env.is_fivefold_repetition() or env.can_claim_draw() or list(env.legal_moves) == []:
                 for i in range(len(critics2)):
                     rewards.append(0.05)
-            
+            prev_AC.AC = copy.deepcopy(AC.AC)
             losses.append(0)
             epoch_counter += 1
             Counter.value += 1
@@ -559,6 +668,11 @@ def train(epochs,AC,pred,target,Counter):
             AC.Value_Sum = [0 for x in range(64)]
             AC.Value_Sum2 = [0 for x in range(64)]
             AC.N_visits = 0
+            prev_AC.Action_Sample = [0 for x in range(64)]
+            prev_AC.Action_Sample2 = [0 for x in range(64)]
+            prev_AC.Value_Sum = [0 for x in range(64)]
+            prev_AC.Value_Sum2 = [0 for x in range(64)]
+            prev_AC.N_visits = 0
             
             for loss_ in losses:
                 loss_.requires_grad = True
@@ -571,10 +685,6 @@ def train(epochs,AC,pred,target,Counter):
 
             extrinsic_returns.append(Return)
             intrinsic_returns.append(Return2)
-            
-            plt.plot(ppo_losses)
-            plt.savefig("PPO Loss.png")
-            plt.clf()
             
             #Optimization Stage:
             AC.optimizer3.zero_grad()
@@ -609,43 +719,71 @@ def train(epochs,AC,pred,target,Counter):
             action_probs2.clear()
             net_reward = 0
             updated_parameters = True
+            AC = tournament(prev_AC,AC,env)
+            torch.save(AC,"AlphaZero.pt")
+            env.reset()
             done = False
             
             print("Epoch:" + str(epoch_counter))
 
-def test(OptionCritic1,world,level):
-    env = gym_super_mario_bros.make('SuperMarioBros-'+str(world)+'-'+str(level)+'-v1')
-    env = JoypadSpace(env, COMPLEX_MOVEMENT)
-    img = env.reset()
-    img2 = downscale_obs(img)
-    dynamic_movement = deque([img2,img2,img2],maxlen=3)
-    dynamic_inpt = torch.Tensor(np.array(dynamic_movement))
-    net_reward = 0
+#Self-Play
+def test(AC,env):
     while True:
-        probs,critic,critic2 = OptionCritic1(dynamic_inpt.to('cuda'))
-        #Choose best Action
-        action1 = np.argmax(probs.cpu().detach().numpy())
-        img, reward, done, info = env.step(action1)
-        env.render()
-        net_reward += reward
-        if done:
-            img = env.reset()
-            img2 = downscale_obs(img)
-            dynamic_movement = deque([img2,img2,img2],maxlen=3)
-            dynamic_inpt = torch.Tensor(np.array(dynamic_movement))
-            net_reward = 0
-        dynamic_movement.append(downscale_obs(img))
-        dynamic_inpt = torch.Tensor(np.array(dynamic_movement))
+        #Get the probabilities and critic value from the Actor Critic
+        probs,probs2,critic_,critic_2 = AC(env)
+        prev_AC = AC
+        action1 = AC.action
+        action2 = AC.action2
+        curr_location = utilities.encode_legalmove(action1)
+        next_location = utilities.encode_legalmove(action2)
+        combined_move = curr_location + next_location
+        env.push_uci(combined_move)
+        display.start(env.fen())
+        
+        AC.planning = True
+        AC.First_Time = True
+
+def Play_Against(AC,env):
+    while True:
+        probs,probs2,critic_,critic_2 = AC(env)
+        prev_AC = AC
+        action1 = AC.action
+        action2 = AC.action2
+        curr_location = utilities.encode_legalmove(action1)
+        next_location = utilities.encode_legalmove(action2)
+        combined_move = curr_location + next_location
+        env.push_uci(combined_move)
+        display.start(env.fen())
+
+        AC.planning = True
+        AC.First_Time = True
+
+        print("Your Turn(Human)!")
+        move = input("Move:")
+        env.push_sans(move)
 
 #-------------------------------------->In-case I want to do multiprocessing with the AlphaZero AI
-processes = []
 if __name__ == "__main__":
     epochs = 5000
-    AC = ActorCritic().to('cuda')
+    processes = []
+    agents = 3
+    AC = torch.load("AlphaZero.pt")
     pred = predictor_net().to('cuda')
     target = target_net().to('cuda')
     AC.share_memory()
     pred.share_memory()
     target.share_memory()
     Counter = mp.Value('f',0)
-    train(epochs,AC,pred,target,Counter)
+    #Train AlphaZero In Parallel:
+    print("Training Started!")
+    for i in range(agents):
+        p = mp.Process(target=train,args=(epochs,AC,pred,target,Counter)) 
+        p.start()
+        processes.append(p)
+    for p in processes: 
+        p.join()
+    for p in processes: 
+        p.terminate()
+    print("Training Completed!")
+    #Play Against the AI(When Training Completes)
+    Play_Against(AC,env)
