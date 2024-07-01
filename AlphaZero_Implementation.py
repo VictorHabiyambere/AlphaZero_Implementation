@@ -9,10 +9,6 @@
 #Break-up your implementation in mangeable steps
 #Let's import the library because we will obviously use it
 
-from nes_py.wrappers import JoypadSpace
-import gym_super_mario_bros
-from gym_super_mario_bros.actions import COMPLEX_MOVEMENT,RIGHT_ONLY,SIMPLE_MOVEMENT
-import gym
 from math import *
 from chessboard import display
 
@@ -22,7 +18,6 @@ from chessboard import display
 
 #deep learning libraries
 import torch
-from IPython.display import clear_output
 from torch import nn
 from torch import optim
 import torch.nn.functional as F
@@ -434,6 +429,7 @@ def tournament(prev_AC,curr_AC,env):
         next_location = utilities.encode_legalmove(action2)
         combined_move = curr_location + next_location
         env2.push_uci(combined_move)
+        display.start(env2.fen())
 
         prev_AC.First_Time = True
 
@@ -463,6 +459,7 @@ def tournament(prev_AC,curr_AC,env):
         combined_move = curr_location + next_location
         legal_moves = list(env2.legal_moves)
         env2.push_uci(combined_move)
+        display.start(env2.fen())
 
         curr_AC.First_Time = True
         
@@ -561,13 +558,13 @@ def train(epochs,AC,pred,target,Counter):
     while epoch_counter != epochs:
         #Get the probabilities and critic value from the Actor Critic
         probs,probs2,critic_,critic_2 = AC(env)
-        prev_AC = AC
         action1 = AC.action
         action2 = AC.action2
         curr_location = utilities.encode_legalmove(action1)
         next_location = utilities.encode_legalmove(action2)
         combined_move = curr_location + next_location
         env.push_uci(combined_move)
+        display.start(env.fen())
         
         AC.planning = True
         AC.First_Time = True
@@ -743,24 +740,23 @@ def test(AC,env):
         AC.planning = True
         AC.First_Time = True
 
-def Play_Against(AC,env):
-    while True:
+def Play_Against(AC,env1):
+    while not env1.is_checkmate() and not env1.is_stalemate() and not env1.is_insufficient_material() and not env1.is_seventyfive_moves() and not env1.is_fivefold_repetition() and not env1.can_claim_draw() and not list(env1.legal_moves) == []:
         probs,probs2,critic_,critic_2 = AC(env)
-        prev_AC = AC
         action1 = AC.action
         action2 = AC.action2
         curr_location = utilities.encode_legalmove(action1)
         next_location = utilities.encode_legalmove(action2)
         combined_move = curr_location + next_location
-        env.push_uci(combined_move)
-        display.start(env.fen())
+        env1.push_uci(combined_move)
+        display.start(env1.fen())
 
         AC.planning = True
         AC.First_Time = True
-
-        print("Your Turn(Human)!")
-        move = input("Move:")
-        env.push_sans(move)
+        
+        move = input("Human Move:")
+        env1.push_san(move)
+        display.start(env1.fen())
 
 #-------------------------------------->In-case I want to do multiprocessing with the AlphaZero AI
 if __name__ == "__main__":
@@ -768,6 +764,11 @@ if __name__ == "__main__":
     processes = []
     agents = 3
     AC = torch.load("AlphaZero.pt")
+    AC.Action_Sample = [0 for x in range(64)]
+    AC.Action_Sample2 = [0 for x in range(64)]
+    AC.Value_Sum = [0 for x in range(64)]
+    AC.Value_Sum2 = [0 for x in range(64)]
+    AC.N_visits = 0
     pred = predictor_net().to('cuda')
     target = target_net().to('cuda')
     AC.share_memory()
