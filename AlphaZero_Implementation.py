@@ -763,7 +763,7 @@ if __name__ == "__main__":
     epochs = 5000
     processes = []
     agents = 3
-    AC = ActorCritc()
+    AC = ActorCritic()
     AC.Action_Sample = [0 for x in range(64)]
     AC.Action_Sample2 = [0 for x in range(64)]
     AC.Value_Sum = [0 for x in range(64)]
