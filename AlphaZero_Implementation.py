@@ -498,7 +498,7 @@ def train(epochs,AC,pred,target,Counter):
     best_AC = AC
     prev_AC = ActorCritic()
     wins = 0
-    losses = 0
+    actor_losses = 0
     win_ratio = 0
 
     gamma = 0.9
@@ -545,9 +545,6 @@ def train(epochs,AC,pred,target,Counter):
     actions = []
     best_nodes = []
     losses = []
-    
-    updated_parameters = False
-    next_time = False
 
     done = False
     lossfn = nn.MSELoss()
@@ -610,7 +607,7 @@ def train(epochs,AC,pred,target,Counter):
             epoch_counter += 1
             Counter.value += 1
             episode_length = 0
-            loss = 0
+            actor_loss = 0
             i_loss = torch.Tensor([0])
             e_loss = torch.Tensor([0])
             i_ = len(critics) - 1
@@ -637,8 +634,8 @@ def train(epochs,AC,pred,target,Counter):
                 Action_Vector[action1-1] = True
                 Action_Vector2 = torch.zeros(64)
                 Action_Vector2[action2-1] = True
-                loss += lossfn2(action_probs[i_].cpu(),Action_Vector.cpu()) - 0.01 * entropies[i_]
-                loss += lossfn2(action_probs2[i_].cpu(),Action_Vector2.cpu()) - 0.01 * entropies2[i_]
+                actor_loss += lossfn2(action_probs[i_].cpu(),Action_Vector.cpu()) - 0.01 * entropies[i_]
+                actor_loss += lossfn2(action_probs2[i_].cpu(),Action_Vector2.cpu()) - 0.01 * entropies2[i_]
                 
                 e_loss += lossfn(expected_return.cpu(),Return.cpu()).detach()
                 i_loss += lossfn(expected_return2.cpu(),Return2.cpu()).detach()
@@ -664,14 +661,14 @@ def train(epochs,AC,pred,target,Counter):
                 loss_.requires_grad = True
                 loss2 += loss_
             
-            losses.append(loss.item())
+            actor_losses.append(actor_loss.item())
 
             extrinsic_returns.append(Return)
             intrinsic_returns.append(Return2)
             
             #Optimization Stage:
             AC.optimizer3.zero_grad()
-            loss.backward()
+            actor_loss.backward()
             AC.optimizer3.step()
             
             curiosity.zero_grad()
@@ -687,10 +684,6 @@ def train(epochs,AC,pred,target,Counter):
             i_loss.requires_grad = True
             i_loss.backward()
             AC.optimizer2.step()
-
-            #Reset Stage:
-            curr_probs.clear()
-            curr_probs2.clear()
             
             critics.clear()
             critics2.clear()
@@ -701,7 +694,6 @@ def train(epochs,AC,pred,target,Counter):
             action_probs.clear()
             action_probs2.clear()
             net_reward = 0
-            updated_parameters = True
             AC = tournament(prev_AC,AC,env)
             torch.save(AC,"AlphaZero.pt")
             env.reset()
