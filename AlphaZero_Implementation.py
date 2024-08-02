@@ -501,7 +501,7 @@ def train(epochs,AC,pred,target,Counter):
     losses = 0
     win_ratio = 0
 
-    gamma = 0.9 #C
+    gamma = 0.9
     gamma2 = 0.99
     lifespan = 0
     maxlength = 15
@@ -534,7 +534,7 @@ def train(epochs,AC,pred,target,Counter):
     curiosity_spikes = []
     extrinsic_returns = []
     intrinsic_returns = []
-    ppo_losses = []
+    losses = []
     rn_losses = []
     expected_rewards = []
     dynamic_outputs = []
@@ -554,7 +554,6 @@ def train(epochs,AC,pred,target,Counter):
     lossfn2 = nn.CrossEntropyLoss()
     
     curiosity = optim.Adam(pred.parameters(),lr=1e-4)
-    #prev_lives = env.ale.lives()
     while epoch_counter != epochs:
         #Get the probabilities and critic value from the Actor Critic
         probs,probs2,critic_,critic_2 = AC(env)
@@ -576,9 +575,6 @@ def train(epochs,AC,pred,target,Counter):
         action_probs.append(probs)
         curr_prob2 = probs2[action2-1]
         action_probs2.append(probs2)
-        
-        curr_probs.append(curr_prob)
-        curr_probs2.append(curr_prob2)
         
         entropy = Categorical(probs).entropy()
         entropies.append(entropy)
@@ -614,7 +610,7 @@ def train(epochs,AC,pred,target,Counter):
             epoch_counter += 1
             Counter.value += 1
             episode_length = 0
-            ppo_loss = 0
+            loss = 0
             i_loss = torch.Tensor([0])
             e_loss = torch.Tensor([0])
             i_ = len(critics) - 1
@@ -624,17 +620,10 @@ def train(epochs,AC,pred,target,Counter):
             Return = 0
             Return2 = 0
             b = 0
-            env.reset()
-            
-            if updated_parameters == False:
-                for i in range(len(curr_probs)):
-                    old_probs.append(curr_probs[i])
-                for i in range(len(curr_probs)):
-                    old_probs2.append(curr_probs2[i])
 
-            #Compute the PPO Los,the Intrinsic Loss and the Extrinsic Loss
+            #Compute the Loss,the Intrinsic Loss and the Extrinsic Loss
             
-            for critic1 in reversed(critics2):
+            for critic1 in reversed(critics1):
                 
                 #Calculate the actual net return
                 Return = Return * gamma2 ** b + torch.Tensor([rewards[i_]]).to('cuda')
@@ -648,8 +637,8 @@ def train(epochs,AC,pred,target,Counter):
                 Action_Vector[action1-1] = True
                 Action_Vector2 = torch.zeros(64)
                 Action_Vector2[action2-1] = True
-                ppo_loss += lossfn2(action_probs[i_].cpu(),Action_Vector.cpu())
-                ppo_loss += lossfn2(action_probs2[i_].cpu(),Action_Vector2.cpu())
+                loss += lossfn2(action_probs[i_].cpu(),Action_Vector.cpu()) - 0.01 * entropies[i_]
+                loss += lossfn2(action_probs2[i_].cpu(),Action_Vector2.cpu()) - 0.01 * entropies2[i_]
                 
                 e_loss += lossfn(expected_return.cpu(),Return.cpu()).detach()
                 i_loss += lossfn(expected_return2.cpu(),Return2.cpu()).detach()
@@ -674,18 +663,15 @@ def train(epochs,AC,pred,target,Counter):
             for loss_ in losses:
                 loss_.requires_grad = True
                 loss2 += loss_
-
-            old_probs = curr_probs
-            old_probs2 = curr_probs2
             
-            ppo_losses.append(ppo_loss.item())
+            losses.append(loss.item())
 
             extrinsic_returns.append(Return)
             intrinsic_returns.append(Return2)
             
             #Optimization Stage:
             AC.optimizer3.zero_grad()
-            ppo_loss.backward()
+            loss.backward()
             AC.optimizer3.step()
             
             curiosity.zero_grad()
