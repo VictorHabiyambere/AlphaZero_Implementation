@@ -498,7 +498,7 @@ def train(epochs,AC,pred,target,Counter):
     best_AC = AC
     prev_AC = ActorCritic()
     wins = 0
-    actor_losses = 0
+    actor_losses = []
     win_ratio = 0
 
     gamma = 0.9
@@ -698,6 +698,7 @@ def train(epochs,AC,pred,target,Counter):
             action_probs2.clear()
             actions_taken.clear()
             actions_taken2.clear()
+            actor_losses.clear()
             net_reward = 0
             AC = tournament(prev_AC,AC,env)
             torch.save(AC,"AlphaZero.pt")
