@@ -698,7 +698,6 @@ def train(epochs,AC,pred,target,Counter):
             action_probs2.clear()
             actions_taken.clear()
             actions_taken2.clear()
-            actor_losses.clear()
             net_reward = 0
             AC = tournament(prev_AC,AC,env)
             torch.save(AC,"AlphaZero.pt")
