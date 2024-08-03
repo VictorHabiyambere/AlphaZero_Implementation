@@ -623,7 +623,7 @@ def train(epochs,AC,pred,target,Counter):
 
             #Compute the Loss,the Intrinsic Loss and the Extrinsic Loss
             
-            for critic1 in reversed(critics1):
+            for critic1 in reversed(critics):
                 
                 #Calculate the actual net return
                 Return = Return * gamma2 ** b + torch.Tensor([rewards[i_]]).to('cuda')
