@@ -545,7 +545,8 @@ def train(epochs,AC,pred,target,Counter):
     actions = []
     best_nodes = []
     losses = []
-
+    actions_taken = []
+    actions_taken2 = []
     done = False
     lossfn = nn.MSELoss()
     lossfn2 = nn.CrossEntropyLoss()
@@ -556,6 +557,8 @@ def train(epochs,AC,pred,target,Counter):
         probs,probs2,critic_,critic_2 = AC(env)
         action1 = AC.action
         action2 = AC.action2
+        actions_taken.append(action1)
+        actions_taken2.append(action2)
         curr_location = utilities.encode_legalmove(action1)
         next_location = utilities.encode_legalmove(action2)
         combined_move = curr_location + next_location
@@ -631,9 +634,9 @@ def train(epochs,AC,pred,target,Counter):
                 expected_return2 = expected_return2 * gamma ** b + critics2[i_]
                 
                 Action_Vector = torch.zeros(64)
-                Action_Vector[action1-1] = True
+                Action_Vector[actions_taken[i_]-1] = True
                 Action_Vector2 = torch.zeros(64)
-                Action_Vector2[action2-1] = True
+                Action_Vector2[actions_taken2[i_]-1] = True
                 actor_loss += lossfn2(action_probs[i_].cpu(),Action_Vector.cpu()) - 0.01 * entropies[i_]
                 actor_loss += lossfn2(action_probs2[i_].cpu(),Action_Vector2.cpu()) - 0.01 * entropies2[i_]
                 
@@ -693,6 +696,8 @@ def train(epochs,AC,pred,target,Counter):
             entropies2.clear()
             action_probs.clear()
             action_probs2.clear()
+            actions_taken.clear()
+            actions_taken2.clear()
             net_reward = 0
             AC = tournament(prev_AC,AC,env)
             torch.save(AC,"AlphaZero.pt")
